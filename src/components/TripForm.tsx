@@ -19,6 +19,7 @@ export default function TripForm() {
   const [days, setDays] = useState(3);
   const [categories, setCategories] = useState<AttractionCategory[]>(['interesting_places', 'historic', 'natural']);
   const [maxDaily, setMaxDaily] = useState(350);
+  const [stopsPerDay, setStopsPerDay] = useState(3);
   const [freeOnly, setFreeOnly] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,6 +40,7 @@ export default function TripForm() {
     const filters: TripFilters = {
       categories,
       maxDailyDistanceKm: maxDaily,
+      stopsPerDay,
       freePlacesOnly: freeOnly,
     };
 
@@ -65,6 +67,7 @@ export default function TripForm() {
         days: days.toString(),
         cats: categories.join(','),
         maxDist: maxDaily.toString(),
+        stops: stopsPerDay.toString(),
         free: freeOnly ? '1' : '0',
       });
 
@@ -130,6 +133,26 @@ export default function TripForm() {
         <div className="flex justify-between text-xs text-gray-400">
           <span>1 jour</span>
           <span>21 jours</span>
+        </div>
+      </div>
+
+      {/* Stops per day */}
+      <div className="space-y-2">
+        <div className="flex justify-between items-center">
+          <label className="text-sm font-semibold text-gray-700">Arrêts par jour</label>
+          <span className="text-amber-600 font-bold text-lg">{stopsPerDay} arrêt{stopsPerDay > 1 ? 's' : ''}</span>
+        </div>
+        <input
+          type="range"
+          min={1}
+          max={6}
+          value={stopsPerDay}
+          onChange={(e) => setStopsPerDay(Number(e.target.value))}
+          className="w-full accent-amber-500"
+        />
+        <div className="flex justify-between text-xs text-gray-400">
+          <span>1 arrêt</span>
+          <span>6 arrêts</span>
         </div>
       </div>
 

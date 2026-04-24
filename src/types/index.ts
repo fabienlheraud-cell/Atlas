@@ -55,6 +55,7 @@ export interface TripPlan {
 export interface TripFilters {
   categories: AttractionCategory[];
   maxDailyDistanceKm: number;
+  stopsPerDay: number;
   freePlacesOnly: boolean;
 }
 

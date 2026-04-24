@@ -49,11 +49,13 @@ function TripPage() {
 
     const cats = (searchParams.get('cats') || 'interesting_places,historic,natural').split(',') as AttractionCategory[];
     const maxDist = Number(searchParams.get('maxDist') || '350');
+    const stopsPerDay = Number(searchParams.get('stops') || '3');
     const freeOnly = searchParams.get('free') === '1';
 
     const filters: TripFilters = {
       categories: cats,
       maxDailyDistanceKm: maxDist,
+      stopsPerDay,
       freePlacesOnly: freeOnly,
     };
 

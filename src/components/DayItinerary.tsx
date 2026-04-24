@@ -14,7 +14,7 @@ export default function DayItinerary({ day }: Props) {
         <div>
           <h3 className="font-bold text-gray-800">Jour {day.day}</h3>
           <p className="text-xs text-gray-400">
-            {day.stops.length} arrêt{day.stops.length > 1 ? 's' : ''} · ~{day.totalDistance} km
+            {day.stops.length} arrêt{day.stops.length > 1 ? 's' : ''} · ~{day.totalDistance} km · ~{day.totalDriveTime} min de route
           </p>
         </div>
       </div>

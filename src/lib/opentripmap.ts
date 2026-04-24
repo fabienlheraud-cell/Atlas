@@ -44,7 +44,6 @@ export async function fetchAttractionsNear(
     lat: center.lat.toString(),
     kinds,
     limit: limit.toString(),
-    rate: '2', // minimum interest rating
     apikey: apiKey,
   });
 
@@ -57,8 +56,8 @@ export async function fetchAttractionsNear(
     point: { lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] },
   })) ?? [];
 
-  // Fetch details for the top places (limit API calls)
-  const top = places.filter((p) => p.name && p.name.trim()).slice(0, 10);
+  // Fetch details for the top named places (limit API calls to 6 per point)
+  const top = places.filter((p) => p.name && p.name.trim()).slice(0, 6);
   const detailed = await Promise.all(top.map((p) => fetchPlaceDetail(p.xid, apiKey)));
 
   return detailed.filter((a): a is Attraction => a !== null);
