@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { AttractionCategory, TripFilters } from '@/types';
 
@@ -12,17 +12,51 @@ const CATEGORIES: { id: AttractionCategory; label: string; emoji: string }[] = [
   { id: 'cultural', label: 'Culture & art', emoji: '🎨' },
 ];
 
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
 export default function TripForm() {
   const router = useRouter();
   const [start, setStart] = useState('');
   const [end, setEnd] = useState('');
-  const [days, setDays] = useState(3);
-  const [categories, setCategories] = useState<AttractionCategory[]>(['interesting_places', 'historic', 'natural']);
+  const [estimatedKm, setEstimatedKm] = useState<number | null>(null);
+  const [estimating, setEstimating] = useState(false);
   const [maxDaily, setMaxDaily] = useState(350);
   const [stopsPerDay, setStopsPerDay] = useState(3);
+  const [categories, setCategories] = useState<AttractionCategory[]>(['interesting_places', 'historic', 'natural']);
   const [freeOnly, setFreeOnly] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Nombre de jours calculé automatiquement
+  const days = estimatedKm ? Math.max(1, Math.ceil(estimatedKm / maxDaily)) : null;
+
+  const estimateDistance = useCallback(async (startVal: string, endVal: string) => {
+    if (!startVal.trim() || !endVal.trim()) return;
+    setEstimating(true);
+    setEstimatedKm(null);
+    try {
+      const [r1, r2] = await Promise.all([
+        fetch(`/api/geocode?q=${encodeURIComponent(startVal)}`).then((r) => r.json()),
+        fetch(`/api/geocode?q=${encodeURIComponent(endVal)}`).then((r) => r.json()),
+      ]);
+      if (r1.coordinates && r2.coordinates) {
+        const straight = haversineKm(
+          r1.coordinates.lat, r1.coordinates.lng,
+          r2.coordinates.lat, r2.coordinates.lng
+        );
+        setEstimatedKm(Math.round(straight * 1.25));
+      }
+    } catch { /* silently ignore */ }
+    setEstimating(false);
+  }, []);
 
   function toggleCategory(cat: AttractionCategory) {
     setCategories((prev) =>
@@ -37,6 +71,8 @@ export default function TripForm() {
     setLoading(true);
     setError(null);
 
+    const tripDays = days ?? Math.max(1, Math.ceil((estimatedKm ?? 500) / maxDaily));
+
     const filters: TripFilters = {
       categories,
       maxDailyDistanceKm: maxDaily,
@@ -48,7 +84,7 @@ export default function TripForm() {
       const res = await fetch('/api/plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ startAddress: start, endAddress: end, days, filters }),
+        body: JSON.stringify({ startAddress: start, endAddress: end, days: tripDays, filters }),
       });
 
       const data = await res.json();
@@ -58,13 +94,12 @@ export default function TripForm() {
         return;
       }
 
-      // Store trip in sessionStorage and redirect
       sessionStorage.setItem('currentTrip', JSON.stringify(data));
 
       const params = new URLSearchParams({
         start: encodeURIComponent(start),
         end: encodeURIComponent(end),
-        days: days.toString(),
+        days: tripDays.toString(),
         cats: categories.join(','),
         maxDist: maxDaily.toString(),
         stops: stopsPerDay.toString(),
@@ -80,11 +115,9 @@ export default function TripForm() {
   }
 
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="w-full bg-white rounded-2xl shadow-2xl p-8 space-y-6"
-    >
-      {/* Locations */}
+    <form onSubmit={handleSubmit} className="w-full bg-white rounded-2xl shadow-2xl p-8 space-y-6">
+
+      {/* Villes */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="space-y-1">
           <label className="text-sm font-semibold text-gray-700">Départ</label>
@@ -94,6 +127,7 @@ export default function TripForm() {
               type="text"
               value={start}
               onChange={(e) => setStart(e.target.value)}
+              onBlur={() => estimateDistance(start, end)}
               placeholder="ex. Montréal, QC"
               required
               className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 text-gray-800 placeholder-gray-400"
@@ -108,6 +142,7 @@ export default function TripForm() {
               type="text"
               value={end}
               onChange={(e) => setEnd(e.target.value)}
+              onBlur={() => estimateDistance(start, end)}
               placeholder="ex. Toronto, ON"
               required
               className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 text-gray-800 placeholder-gray-400"
@@ -116,31 +151,58 @@ export default function TripForm() {
         </div>
       </div>
 
-      {/* Days */}
+      {/* Distance estimée */}
+      {(estimating || estimatedKm) && (
+        <div className="flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+          <span className="text-xl">📏</span>
+          {estimating ? (
+            <span className="text-sm text-amber-700 animate-pulse">Calcul de la distance…</span>
+          ) : estimatedKm ? (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+              <span className="font-bold text-amber-700">~{estimatedKm.toLocaleString()} km</span>
+              {days && (
+                <span className="text-gray-600">
+                  → <span className="font-semibold text-gray-800">{days} jour{days > 1 ? 's' : ''}</span> de voyage
+                </span>
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {/* Distance max/jour → détermine le nombre de jours */}
       <div className="space-y-2">
         <div className="flex justify-between items-center">
-          <label className="text-sm font-semibold text-gray-700">Durée du voyage</label>
-          <span className="text-amber-600 font-bold text-lg">{days} jour{days > 1 ? 's' : ''}</span>
+          <label className="text-sm font-semibold text-gray-700">Distance max par jour</label>
+          <div className="text-right">
+            <span className="text-amber-600 font-bold">{maxDaily} km/jour</span>
+            {days && (
+              <span className="text-xs text-gray-400 block">
+                = {days} jour{days > 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
         </div>
         <input
           type="range"
-          min={1}
-          max={21}
-          value={days}
-          onChange={(e) => setDays(Number(e.target.value))}
+          min={100}
+          max={700}
+          step={50}
+          value={maxDaily}
+          onChange={(e) => setMaxDaily(Number(e.target.value))}
           className="w-full accent-amber-500"
         />
         <div className="flex justify-between text-xs text-gray-400">
-          <span>1 jour</span>
-          <span>21 jours</span>
+          <span>100 km/jour</span>
+          <span>700 km/jour</span>
         </div>
       </div>
 
-      {/* Stops per day */}
+      {/* Arrêts par jour */}
       <div className="space-y-2">
         <div className="flex justify-between items-center">
           <label className="text-sm font-semibold text-gray-700">Arrêts par jour</label>
-          <span className="text-amber-600 font-bold text-lg">{stopsPerDay} arrêt{stopsPerDay > 1 ? 's' : ''}</span>
+          <span className="text-amber-600 font-bold">{stopsPerDay} arrêt{stopsPerDay > 1 ? 's' : ''}</span>
         </div>
         <input
           type="range"
@@ -156,7 +218,7 @@ export default function TripForm() {
         </div>
       </div>
 
-      {/* Categories */}
+      {/* Types de lieux */}
       <div className="space-y-2">
         <label className="text-sm font-semibold text-gray-700">Types de lieux</label>
         <div className="flex flex-wrap gap-2">
@@ -177,35 +239,18 @@ export default function TripForm() {
         </div>
       </div>
 
-      {/* Advanced */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="space-y-2">
-          <div className="flex justify-between items-center">
-            <label className="text-sm font-semibold text-gray-700">Distance max/jour</label>
-            <span className="text-amber-600 font-bold">{maxDaily} km</span>
-          </div>
-          <input
-            type="range"
-            min={100}
-            max={700}
-            step={50}
-            value={maxDaily}
-            onChange={(e) => setMaxDaily(Number(e.target.value))}
-            className="w-full accent-amber-500"
-          />
-        </div>
-        <div className="flex items-center gap-3 mt-4">
-          <input
-            type="checkbox"
-            id="freeOnly"
-            checked={freeOnly}
-            onChange={(e) => setFreeOnly(e.target.checked)}
-            className="w-4 h-4 accent-amber-500"
-          />
-          <label htmlFor="freeOnly" className="text-sm font-semibold text-gray-700 cursor-pointer">
-            Entrée gratuite uniquement
-          </label>
-        </div>
+      {/* Entrée gratuite */}
+      <div className="flex items-center gap-3">
+        <input
+          type="checkbox"
+          id="freeOnly"
+          checked={freeOnly}
+          onChange={(e) => setFreeOnly(e.target.checked)}
+          className="w-4 h-4 accent-amber-500"
+        />
+        <label htmlFor="freeOnly" className="text-sm font-semibold text-gray-700 cursor-pointer">
+          Entrée gratuite uniquement
+        </label>
       </div>
 
       {error && (
@@ -220,14 +265,9 @@ export default function TripForm() {
         className="w-full py-4 bg-amber-500 hover:bg-amber-600 disabled:bg-gray-300 text-white font-bold text-lg rounded-xl transition-colors flex items-center justify-center gap-2"
       >
         {loading ? (
-          <>
-            <span className="animate-spin">⟳</span>
-            Génération en cours…
-          </>
+          <><span className="animate-spin">⟳</span> Génération en cours…</>
         ) : (
-          <>
-            🗺️ Générer mon road trip
-          </>
+          <>🗺️ Générer mon road trip</>
         )}
       </button>
     </form>
