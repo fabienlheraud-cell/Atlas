@@ -2,94 +2,117 @@ import { Attraction, AttractionCategory, Coordinates } from '@/types';
 
 const BASE_URL = 'https://api.opentripmap.com/0.1/en';
 
-interface OTMPlace {
+interface OTMListPlace {
   xid: string;
-  name: string;
+  name?: string;
   rate: number;
   kinds: string;
   point: { lon: number; lat: number };
 }
 
-interface OTMPlaceDetail {
+interface OTMDetail {
   xid: string;
   name: string;
   kinds: string;
   point: { lon: number; lat: number };
-  address?: {
-    road?: string;
-    city?: string;
-    state?: string;
-    country?: string;
-  };
+  address?: { road?: string; city?: string; state?: string };
   preview?: { source: string };
   wikipedia_extracts?: { text: string };
   wikipedia?: string;
-  url?: string;
   rate?: string;
 }
 
-export async function fetchAttractionsNear(
-  center: Coordinates,
-  radiusM: number,
+// Fetch all attractions within a bounding box — one API call instead of many
+export async function fetchAttractionsByBbox(
+  routePoints: [number, number][], // [lat, lng]
   categories: AttractionCategory[],
-  limit = 20
+  neededCount: number
 ): Promise<Attraction[]> {
   const apiKey = process.env.OPENTRIPMAP_API_KEY;
   if (!apiKey) throw new Error('OPENTRIPMAP_API_KEY is not set');
 
+  // Compute bounding box from route with 0.5° padding
+  const lats = routePoints.map((p) => p[0]);
+  const lngs = routePoints.map((p) => p[1]);
+  const pad = 0.5;
+  const latMin = Math.min(...lats) - pad;
+  const latMax = Math.max(...lats) + pad;
+  const lonMin = Math.min(...lngs) - pad;
+  const lonMax = Math.max(...lngs) + pad;
+
   const kinds = categories.join(',');
   const params = new URLSearchParams({
-    radius: radiusM.toString(),
-    lon: center.lng.toString(),
-    lat: center.lat.toString(),
+    lon_min: lonMin.toString(),
+    lat_min: latMin.toString(),
+    lon_max: lonMax.toString(),
+    lat_max: latMax.toString(),
     kinds,
-    limit: limit.toString(),
+    limit: '100',
     apikey: apiKey,
   });
 
-  const res = await fetch(`${BASE_URL}/places/radius?${params}`);
-  if (!res.ok) return [];
+  const res = await fetch(`${BASE_URL}/places/bbox?${params}`);
+  if (!res.ok) {
+    console.error(`OTM bbox error ${res.status}`);
+    return [];
+  }
 
   const data = await res.json();
-  const places: OTMPlace[] = data.features?.map((f: { properties: OTMPlace; geometry: { coordinates: [number, number] } }) => ({
-    ...f.properties,
-    point: { lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] },
-  })) ?? [];
+  const places: OTMListPlace[] = data.features?.map(
+    (f: { properties: OTMListPlace; geometry: { coordinates: [number, number] } }) => ({
+      ...f.properties,
+      point: { lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] },
+    })
+  ) ?? [];
 
-  // Fetch details for the top named places (limit API calls to 6 per point)
-  const top = places.filter((p) => p.name && p.name.trim()).slice(0, 6);
-  const detailed = await Promise.all(top.map((p) => fetchPlaceDetail(p.xid, apiKey)));
+  console.log(`OTM bbox: ${places.length} candidates found`);
 
-  return detailed.filter((a): a is Attraction => a !== null);
+  // Sort by rate descending, take best candidates (3× what we need for selection margin)
+  const candidates = places
+    .sort((a, b) => (b.rate ?? 0) - (a.rate ?? 0))
+    .slice(0, Math.min(neededCount * 3, 30));
+
+  // Fetch details in parallel (batched to avoid rate limits)
+  const details = await Promise.all(
+    candidates.map((p) => fetchPlaceDetail(p.xid, apiKey))
+  );
+
+  const results = details.filter((a): a is Attraction => a !== null);
+  console.log(`OTM: ${results.length} valid attractions after detail fetch`);
+  return results;
 }
 
 async function fetchPlaceDetail(xid: string, apiKey: string): Promise<Attraction | null> {
-  const res = await fetch(`${BASE_URL}/places/xid/${xid}?apikey=${apiKey}`);
-  if (!res.ok) return null;
+  try {
+    const res = await fetch(`${BASE_URL}/places/xid/${xid}?apikey=${apiKey}`);
+    if (!res.ok) return null;
 
-  const d: OTMPlaceDetail = await res.json();
-  if (!d.name || !d.point) return null;
+    const d: OTMDetail = await res.json();
+    if (!d.name?.trim() || !d.point) return null;
 
-  const address = d.address
-    ? [d.address.road, d.address.city, d.address.state].filter(Boolean).join(', ')
-    : undefined;
+    const address = d.address
+      ? [d.address.road, d.address.city, d.address.state].filter(Boolean).join(', ')
+      : undefined;
 
-  const categories = (d.kinds || '')
-    .split(',')
-    .filter((k) =>
-      ['interesting_places', 'historic', 'natural', 'architecture', 'cultural'].includes(k)
-    ) as AttractionCategory[];
+    const cats = (d.kinds || '')
+      .split(',')
+      .filter((k) =>
+        ['interesting_places', 'historic', 'natural', 'architecture', 'cultural'].includes(k)
+      ) as AttractionCategory[];
 
-  return {
-    id: d.xid,
-    name: d.name,
-    description: d.wikipedia_extracts?.text?.slice(0, 300),
-    coordinates: { lat: d.point.lat, lng: d.point.lon },
-    categories: categories.length ? categories : ['interesting_places'],
-    imageUrl: d.preview?.source,
-    wikiUrl: d.wikipedia,
-    rating: d.rate ? parseFloat(d.rate) : undefined,
-    entryCost: 'unknown',
-    address,
-  };
+    return {
+      id: d.xid,
+      name: d.name,
+      description: d.wikipedia_extracts?.text?.slice(0, 300),
+      coordinates: { lat: d.point.lat, lng: d.point.lon },
+      categories: cats.length ? cats : ['interesting_places'],
+      imageUrl: d.preview?.source,
+      wikiUrl: d.wikipedia,
+      rating: d.rate ? parseFloat(d.rate) : undefined,
+      entryCost: 'unknown',
+      address,
+    };
+  } catch {
+    return null;
+  }
 }

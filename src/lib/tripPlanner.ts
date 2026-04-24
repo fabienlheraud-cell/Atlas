@@ -1,7 +1,7 @@
 import { Attraction, AttractionCategory, Coordinates, DayPlan, TripFilters, TripPlan, TripStop } from '@/types';
-import { fetchAttractionsNear } from './opentripmap';
+import { fetchAttractionsByBbox } from './opentripmap';
 import { geocode } from './nominatim';
-import { getRoute, sampleRoutePoints } from './openroute';
+import { getRoute } from './openroute';
 
 function haversineKm(a: Coordinates, b: Coordinates): number {
   const R = 6371;
@@ -15,6 +15,22 @@ function haversineKm(a: Coordinates, b: Coordinates): number {
   return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
+// Keep only attractions within maxDistKm of the route geometry
+function filterByProximityToRoute(
+  attractions: Attraction[],
+  routePoints: [number, number][],
+  maxDistKm = 40
+): Attraction[] {
+  return attractions.filter((a) => {
+    const minDist = Math.min(
+      ...routePoints.map((p) =>
+        haversineKm(a.coordinates, { lat: p[0], lng: p[1] })
+      )
+    );
+    return minDist <= maxDistKm;
+  });
+}
+
 function deduplicateAttractions(attractions: Attraction[], minDistKm = 10): Attraction[] {
   const result: Attraction[] = [];
   for (const a of attractions) {
@@ -26,22 +42,26 @@ function deduplicateAttractions(attractions: Attraction[], minDistKm = 10): Attr
   return result;
 }
 
-function getRouteProgress(
-  coords: Coordinates,
+// Sort attractions by position along the route (A → B order)
+function sortByRouteProgress(
+  attractions: Attraction[],
   routePoints: [number, number][]
-): number {
+): Attraction[] {
+  return [...attractions].sort((a, b) => {
+    const progressA = bestRouteIndex(a.coordinates, routePoints);
+    const progressB = bestRouteIndex(b.coordinates, routePoints);
+    return progressA - progressB;
+  });
+}
+
+function bestRouteIndex(coords: Coordinates, routePoints: [number, number][]): number {
   let minDist = Infinity;
   let bestIndex = 0;
-
   for (let i = 0; i < routePoints.length; i++) {
     const d = haversineKm(coords, { lat: routePoints[i][0], lng: routePoints[i][1] });
-    if (d < minDist) {
-      minDist = d;
-      bestIndex = i;
-    }
+    if (d < minDist) { minDist = d; bestIndex = i; }
   }
-
-  return bestIndex / (routePoints.length - 1);
+  return bestIndex;
 }
 
 function buildDayPlans(
@@ -51,9 +71,7 @@ function buildDayPlans(
   stopsPerDay: number
 ): DayPlan[] {
   const avgDailyDistanceKm = Math.round(totalDistanceKm / days);
-  // Average driving speed for estimation
   const avgSpeedKmh = 90;
-
   const dayPlans: DayPlan[] = [];
 
   for (let day = 1; day <= days; day++) {
@@ -66,11 +84,7 @@ function buildDayPlans(
     for (const attraction of slice) {
       const dist = prev ? Math.round(haversineKm(prev, attraction.coordinates)) : 0;
       const time = Math.round((dist / avgSpeedKmh) * 60);
-      stops.push({
-        attraction,
-        distanceFromPrevious: dist,
-        driveTimeFromPrevious: time,
-      });
+      stops.push({ attraction, distanceFromPrevious: dist, driveTimeFromPrevious: time });
       prev = attraction.coordinates;
     }
 
@@ -105,40 +119,27 @@ export async function planTrip(
   const stopsPerDay = filters.stopsPerDay ?? 3;
   const totalStopsNeeded = days * stopsPerDay;
 
-  // Sample ~1 point per 60km along the route
-  const sampleCount = Math.max(4, Math.ceil(route.distanceKm / 60));
-  const samplePoints = sampleRoutePoints(route.geometry, sampleCount);
-
   const categories: AttractionCategory[] =
-    filters.categories.length > 0 ? filters.categories : ['interesting_places', 'historic', 'natural'];
+    filters.categories.length > 0
+      ? filters.categories
+      : ['interesting_places', 'historic', 'natural'];
 
-  // Fetch attractions around each sample point (radius 35km)
-  const attractionSets = await Promise.all(
-    samplePoints.map((p) =>
-      fetchAttractionsNear({ lat: p[0], lng: p[1] }, 35000, categories, 20)
-    )
-  );
+  // One bbox call to fetch all candidates along the route
+  let allAttractions = await fetchAttractionsByBbox(route.geometry, categories, totalStopsNeeded);
 
-  let allAttractions = attractionSets.flat();
+  // Filter to attractions actually close to the route
+  allAttractions = filterByProximityToRoute(allAttractions, route.geometry, 40);
 
   if (filters.freePlacesOnly) {
     allAttractions = allAttractions.filter((a) => a.entryCost !== 'paid');
   }
 
-  // Deduplicate (min 10km between attractions)
   allAttractions = deduplicateAttractions(allAttractions, 10);
+  allAttractions = sortByRouteProgress(allAttractions, route.geometry);
 
-  // Sort by position along the route
-  allAttractions.sort(
-    (a, b) =>
-      getRouteProgress(a.coordinates, route.geometry) -
-      getRouteProgress(b.coordinates, route.geometry)
-  );
+  console.log(`planTrip: ${allAttractions.length} attractions after filtering, need ${totalStopsNeeded}`);
 
-  // Take only what we need
   const selected = allAttractions.slice(0, totalStopsNeeded);
-
-  // buildDayPlans mutates selected via splice — pass a copy
   const dayPlans = buildDayPlans([...selected], days, route.distanceKm, stopsPerDay);
 
   return {
