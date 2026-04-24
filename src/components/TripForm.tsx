@@ -29,14 +29,15 @@ export default function TripForm() {
   const [estimatedKm, setEstimatedKm] = useState<number | null>(null);
   const [estimating, setEstimating] = useState(false);
   const [maxDaily, setMaxDaily] = useState(350);
-  const [stopsPerDay, setStopsPerDay] = useState(3);
+  const [kmBetweenStops, setKmBetweenStops] = useState(100);
   const [categories, setCategories] = useState<AttractionCategory[]>(['interesting_places', 'historic', 'natural']);
   const [freeOnly, setFreeOnly] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Nombre de jours calculé automatiquement
+  // Dérivés automatiquement
   const days = estimatedKm ? Math.max(1, Math.ceil(estimatedKm / maxDaily)) : null;
+  const stopsPerDay = Math.max(1, Math.floor(maxDaily / kmBetweenStops));
 
   const estimateDistance = useCallback(async (startVal: string, endVal: string) => {
     if (!startVal.trim() || !endVal.trim()) return;
@@ -103,6 +104,7 @@ export default function TripForm() {
         cats: categories.join(','),
         maxDist: maxDaily.toString(),
         stops: stopsPerDay.toString(),
+        kmStop: kmBetweenStops.toString(),
         free: freeOnly ? '1' : '0',
       });
 
@@ -198,23 +200,29 @@ export default function TripForm() {
         </div>
       </div>
 
-      {/* Arrêts par jour */}
+      {/* Fréquence des arrêts */}
       <div className="space-y-2">
         <div className="flex justify-between items-center">
-          <label className="text-sm font-semibold text-gray-700">Arrêts par jour</label>
-          <span className="text-amber-600 font-bold">{stopsPerDay} arrêt{stopsPerDay > 1 ? 's' : ''}</span>
+          <label className="text-sm font-semibold text-gray-700">Un arrêt tous les</label>
+          <div className="text-right">
+            <span className="text-amber-600 font-bold">{kmBetweenStops} km</span>
+            <span className="text-xs text-gray-400 block">
+              = {stopsPerDay} arrêt{stopsPerDay > 1 ? 's' : ''}/jour
+            </span>
+          </div>
         </div>
         <input
           type="range"
-          min={1}
-          max={6}
-          value={stopsPerDay}
-          onChange={(e) => setStopsPerDay(Number(e.target.value))}
+          min={50}
+          max={300}
+          step={25}
+          value={kmBetweenStops}
+          onChange={(e) => setKmBetweenStops(Number(e.target.value))}
           className="w-full accent-amber-500"
         />
         <div className="flex justify-between text-xs text-gray-400">
-          <span>1 arrêt</span>
-          <span>6 arrêts</span>
+          <span>50 km (fréquent)</span>
+          <span>300 km (espacé)</span>
         </div>
       </div>
 
