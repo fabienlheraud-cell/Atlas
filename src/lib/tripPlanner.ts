@@ -15,46 +15,40 @@ function haversineKm(a: Coordinates, b: Coordinates): number {
   return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
-// Keep only attractions within maxDistKm of the route geometry
+// Downsample geometry to at most maxPoints for performance
+function downsampleGeometry(points: [number, number][], maxPoints = 300): [number, number][] {
+  if (points.length <= maxPoints) return points;
+  const step = Math.ceil(points.length / maxPoints);
+  return points.filter((_, i) => i % step === 0);
+}
+
+// Check if an attraction is within maxDistKm of any route point — uses early exit
+function isNearRoute(coords: Coordinates, routePoints: [number, number][], maxDistKm: number): boolean {
+  for (const p of routePoints) {
+    if (haversineKm(coords, { lat: p[0], lng: p[1] }) <= maxDistKm) return true;
+  }
+  return false;
+}
+
 function filterByProximityToRoute(
   attractions: Attraction[],
   routePoints: [number, number][],
-  maxDistKm = 40
+  maxDistKm = 50
 ): Attraction[] {
-  return attractions.filter((a) => {
-    const minDist = Math.min(
-      ...routePoints.map((p) =>
-        haversineKm(a.coordinates, { lat: p[0], lng: p[1] })
-      )
-    );
-    return minDist <= maxDistKm;
-  });
+  const sampled = downsampleGeometry(routePoints, 300);
+  return attractions.filter((a) => isNearRoute(a.coordinates, sampled, maxDistKm));
 }
 
 function deduplicateAttractions(attractions: Attraction[], minDistKm = 10): Attraction[] {
   const result: Attraction[] = [];
   for (const a of attractions) {
-    const tooClose = result.some(
-      (b) => haversineKm(a.coordinates, b.coordinates) < minDistKm
-    );
+    const tooClose = result.some((b) => haversineKm(a.coordinates, b.coordinates) < minDistKm);
     if (!tooClose) result.push(a);
   }
   return result;
 }
 
-// Sort attractions by position along the route (A → B order)
-function sortByRouteProgress(
-  attractions: Attraction[],
-  routePoints: [number, number][]
-): Attraction[] {
-  return [...attractions].sort((a, b) => {
-    const progressA = bestRouteIndex(a.coordinates, routePoints);
-    const progressB = bestRouteIndex(b.coordinates, routePoints);
-    return progressA - progressB;
-  });
-}
-
-function bestRouteIndex(coords: Coordinates, routePoints: [number, number][]): number {
+function getBestRouteIndex(coords: Coordinates, routePoints: [number, number][]): number {
   let minDist = Infinity;
   let bestIndex = 0;
   for (let i = 0; i < routePoints.length; i++) {
@@ -62,6 +56,16 @@ function bestRouteIndex(coords: Coordinates, routePoints: [number, number][]): n
     if (d < minDist) { minDist = d; bestIndex = i; }
   }
   return bestIndex;
+}
+
+function sortByRouteProgress(attractions: Attraction[], routePoints: [number, number][]): Attraction[] {
+  const sampled = downsampleGeometry(routePoints, 300);
+  const len = sampled.length - 1 || 1;
+  return [...attractions].sort(
+    (a, b) =>
+      getBestRouteIndex(a.coordinates, sampled) / len -
+      getBestRouteIndex(b.coordinates, sampled) / len
+  );
 }
 
 function buildDayPlans(
@@ -119,16 +123,19 @@ export async function planTrip(
   const stopsPerDay = filters.stopsPerDay ?? 3;
   const totalStopsNeeded = days * stopsPerDay;
 
+  // For long routes, fetch more candidates (5× needed, up to 80)
+  const candidateCount = Math.min(totalStopsNeeded * 5, 80);
+
   const categories: AttractionCategory[] =
     filters.categories.length > 0
       ? filters.categories
       : ['interesting_places', 'historic', 'natural'];
 
-  // One bbox call to fetch all candidates along the route
-  let allAttractions = await fetchAttractionsByBbox(route.geometry, categories, totalStopsNeeded);
+  let allAttractions = await fetchAttractionsByBbox(route.geometry, categories, candidateCount);
 
-  // Filter to attractions actually close to the route
-  allAttractions = filterByProximityToRoute(allAttractions, route.geometry, 40);
+  // Proximity filter: 50km for short routes, 80km for long routes
+  const proximityKm = route.distanceKm > 1000 ? 80 : 50;
+  allAttractions = filterByProximityToRoute(allAttractions, route.geometry, proximityKm);
 
   if (filters.freePlacesOnly) {
     allAttractions = allAttractions.filter((a) => a.entryCost !== 'paid');

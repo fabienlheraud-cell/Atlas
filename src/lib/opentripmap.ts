@@ -67,17 +67,19 @@ export async function fetchAttractionsByBbox(
 
   console.log(`OTM bbox: ${places.length} candidates found`);
 
-  // Sort by rate descending, take best candidates (3× what we need for selection margin)
+  // Take best candidates by rate — neededCount already accounts for the selection margin
   const candidates = places
     .sort((a, b) => (b.rate ?? 0) - (a.rate ?? 0))
-    .slice(0, Math.min(neededCount * 3, 30));
+    .slice(0, Math.min(neededCount, 80));
 
-  // Fetch details in parallel (batched to avoid rate limits)
-  const details = await Promise.all(
-    candidates.map((p) => fetchPlaceDetail(p.xid, apiKey))
-  );
+  // Fetch details in batches of 10 to avoid overwhelming the API
+  const results: Attraction[] = [];
+  for (let i = 0; i < candidates.length; i += 10) {
+    const batch = candidates.slice(i, i + 10);
+    const batchDetails = await Promise.all(batch.map((p) => fetchPlaceDetail(p.xid, apiKey)));
+    results.push(...batchDetails.filter((a): a is Attraction => a !== null));
+  }
 
-  const results = details.filter((a): a is Attraction => a !== null);
   console.log(`OTM: ${results.length} valid attractions after detail fetch`);
   return results;
 }
