@@ -1,5 +1,5 @@
 import { Attraction, AttractionCategory, Coordinates, DayPlan, TripFilters, TripPlan, TripStop } from '@/types';
-import { fetchAttractionsByBbox } from './opentripmap';
+import { fetchAttractionsBySegments } from './opentripmap';
 import { geocode } from './nominatim';
 import { getRoute } from './openroute';
 
@@ -123,15 +123,13 @@ export async function planTrip(
   const stopsPerDay = filters.stopsPerDay ?? 3;
   const totalStopsNeeded = days * stopsPerDay;
 
-  // For long routes, fetch more candidates (5× needed, up to 80)
-  const candidateCount = Math.min(totalStopsNeeded * 5, 80);
-
   const categories: AttractionCategory[] =
     filters.categories.length > 0
       ? filters.categories
       : ['interesting_places', 'historic', 'natural'];
 
-  let allAttractions = await fetchAttractionsByBbox(route.geometry, categories, candidateCount);
+  // Segment-based fetch: one small bbox per day, avoids large-bbox API limits
+  let allAttractions = await fetchAttractionsBySegments(route.geometry, categories, days, stopsPerDay);
 
   // Proximity filter: 50km for short routes, 80km for long routes
   const proximityKm = route.distanceKm > 1000 ? 80 : 50;

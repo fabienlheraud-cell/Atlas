@@ -1,4 +1,4 @@
-import { Attraction, AttractionCategory, Coordinates } from '@/types';
+import { Attraction, AttractionCategory } from '@/types';
 
 const BASE_URL = 'https://api.opentripmap.com/0.1/en';
 
@@ -22,66 +22,75 @@ interface OTMDetail {
   rate?: string;
 }
 
-// Fetch all attractions within a bounding box — one API call instead of many
-export async function fetchAttractionsByBbox(
-  routePoints: [number, number][], // [lat, lng]
-  categories: AttractionCategory[],
-  neededCount: number
-): Promise<Attraction[]> {
-  const apiKey = process.env.OPENTRIPMAP_API_KEY;
-  if (!apiKey) throw new Error('OPENTRIPMAP_API_KEY is not set');
+function safeMinMax(values: number[]): [number, number] {
+  let min = values[0];
+  let max = values[0];
+  for (const v of values) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return [min, max];
+}
 
-  // Compute bounding box from route with 0.5° padding
-  const lats = routePoints.map((p) => p[0]);
-  const lngs = routePoints.map((p) => p[1]);
-  const pad = 0.5;
-  const latMin = Math.min(...lats) - pad;
-  const latMax = Math.max(...lats) + pad;
-  const lonMin = Math.min(...lngs) - pad;
-  const lonMax = Math.max(...lngs) + pad;
+// Split geometry into N equal segments, return one representative bbox per segment
+function getSegmentBboxes(
+  routePoints: [number, number][],
+  segments: number,
+  padDeg = 0.4
+): Array<{ latMin: number; latMax: number; lonMin: number; lonMax: number }> {
+  const segSize = Math.ceil(routePoints.length / segments);
+  const boxes = [];
 
-  const kinds = categories.join(',');
+  for (let i = 0; i < segments; i++) {
+    const slice = routePoints.slice(i * segSize, (i + 1) * segSize + 1);
+    if (slice.length === 0) continue;
+
+    const lats = slice.map((p) => p[0]);
+    const lngs = slice.map((p) => p[1]);
+    const [latMin, latMax] = safeMinMax(lats);
+    const [lonMin, lonMax] = safeMinMax(lngs);
+
+    boxes.push({
+      latMin: latMin - padDeg,
+      latMax: latMax + padDeg,
+      lonMin: lonMin - padDeg,
+      lonMax: lonMax + padDeg,
+    });
+  }
+
+  return boxes;
+}
+
+async function fetchBbox(
+  latMin: number, latMax: number,
+  lonMin: number, lonMax: number,
+  kinds: string,
+  apiKey: string,
+  limit = 30
+): Promise<OTMListPlace[]> {
   const params = new URLSearchParams({
     lon_min: lonMin.toString(),
     lat_min: latMin.toString(),
     lon_max: lonMax.toString(),
     lat_max: latMax.toString(),
     kinds,
-    limit: '100',
+    limit: limit.toString(),
     apikey: apiKey,
   });
 
   const res = await fetch(`${BASE_URL}/places/bbox?${params}`);
   if (!res.ok) {
-    console.error(`OTM bbox error ${res.status}`);
+    console.error(`OTM bbox error ${res.status}: ${lonMin},${latMin} → ${lonMax},${latMax}`);
     return [];
   }
 
   const data = await res.json();
-  const places: OTMListPlace[] = data.features?.map(
+  return (data.features ?? []).map(
     (f: { properties: OTMListPlace; geometry: { coordinates: [number, number] } }) => ({
       ...f.properties,
       point: { lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] },
     })
-  ) ?? [];
-
-  console.log(`OTM bbox: ${places.length} candidates found`);
-
-  // Take best candidates by rate — neededCount already accounts for the selection margin
-  const candidates = places
-    .sort((a, b) => (b.rate ?? 0) - (a.rate ?? 0))
-    .slice(0, Math.min(neededCount, 80));
-
-  // Fetch details in batches of 10 to avoid overwhelming the API
-  const results: Attraction[] = [];
-  for (let i = 0; i < candidates.length; i += 10) {
-    const batch = candidates.slice(i, i + 10);
-    const batchDetails = await Promise.all(batch.map((p) => fetchPlaceDetail(p.xid, apiKey)));
-    results.push(...batchDetails.filter((a): a is Attraction => a !== null));
-  }
-
-  console.log(`OTM: ${results.length} valid attractions after detail fetch`);
-  return results;
+  );
 }
 
 async function fetchPlaceDetail(xid: string, apiKey: string): Promise<Attraction | null> {
@@ -117,4 +126,55 @@ async function fetchPlaceDetail(xid: string, apiKey: string): Promise<Attraction
   } catch {
     return null;
   }
+}
+
+// Fetch attractions along a route by splitting it into manageable segments
+export async function fetchAttractionsBySegments(
+  routePoints: [number, number][],
+  categories: AttractionCategory[],
+  days: number,
+  stopsPerDay: number
+): Promise<Attraction[]> {
+  const apiKey = process.env.OPENTRIPMAP_API_KEY;
+  if (!apiKey) throw new Error('OPENTRIPMAP_API_KEY is not set');
+
+  const kinds = categories.join(',');
+  // One segment per day, capped at 5 to limit API calls
+  const numSegments = Math.min(days, 5);
+  const perSegment = Math.ceil(stopsPerDay * 2.5); // 2.5× needed per segment for filtering margin
+
+  const bboxes = getSegmentBboxes(routePoints, numSegments, 0.4);
+  console.log(`OTM: querying ${bboxes.length} segments, ${perSegment} places each`);
+
+  // Fetch each segment bbox sequentially to respect rate limits
+  const allPlaces: OTMListPlace[] = [];
+  const seenXids = new Set<string>();
+
+  for (const box of bboxes) {
+    const places = await fetchBbox(box.latMin, box.latMax, box.lonMin, box.lonMax, kinds, apiKey, perSegment);
+    for (const p of places) {
+      if (!seenXids.has(p.xid)) {
+        seenXids.add(p.xid);
+        allPlaces.push(p);
+      }
+    }
+  }
+
+  console.log(`OTM: ${allPlaces.length} unique candidates across all segments`);
+
+  // Sort by rate and take top candidates for detail fetch
+  const candidates = allPlaces
+    .sort((a, b) => (b.rate ?? 0) - (a.rate ?? 0))
+    .slice(0, Math.min(allPlaces.length, 60));
+
+  // Fetch details in batches of 8
+  const results: Attraction[] = [];
+  for (let i = 0; i < candidates.length; i += 8) {
+    const batch = candidates.slice(i, i + 8);
+    const batchDetails = await Promise.all(batch.map((p) => fetchPlaceDetail(p.xid, apiKey)));
+    results.push(...batchDetails.filter((a): a is Attraction => a !== null));
+  }
+
+  console.log(`OTM: ${results.length} valid attractions after detail fetch`);
+  return results;
 }
